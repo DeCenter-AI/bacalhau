@@ -147,7 +147,9 @@ func NewCmd() *cobra.Command {
 		&ODs.ConfigurationRepo, "stack-repo", ODs.ConfigurationRepo,
 		"Folder to act as the devstack configuration repo",
 	)
-
+	devstackCmd.PersistentFlags().StringVar(
+		&ODs.NetworkType, "network", ODs.NetworkType,
+		"Type of inter-node network layer. e.g. nats and libp2p")
 	return devstackCmd
 }
 
@@ -224,6 +226,11 @@ func runDevstack(cmd *cobra.Command, ODs *devstack.DevStackOptions, IsNoop bool)
 	} else {
 		options = append(options, devstack.WithDependencyInjector(node.NewStandardNodeDependencyInjector()))
 	}
+
+	// Get any certificate settings for devstack and use them if we have a certificate (possibly self-signed).
+	cert, key := config.GetRequesterCertificateSettings()
+	options = append(options, devstack.WithSelfSignedCertificate(cert, key))
+
 	stack, err := devstack.Setup(ctx, cm, fsRepo, options...)
 	if err != nil {
 		return err
