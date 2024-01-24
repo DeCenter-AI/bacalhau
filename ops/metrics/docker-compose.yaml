@@ -20,7 +20,7 @@ services:
     depends_on:
       - prometheus
     volumes:
-      - grafana-storage:/var/lib/grafana
+      - ./grafana/grafana.db:/var/lib/grafana/grafana.db
     ports:
       - 3000:3000
     restart: always
@@ -47,5 +47,4 @@ services:
       - "14268:14268"
 
 volumes:
-  grafana-storage: {}
   prometheus-storage: {}
