@@ -16,6 +16,7 @@ import (
 	"github.com/bacalhau-project/bacalhau/pkg/lib/math"
 	"github.com/bacalhau-project/bacalhau/pkg/models"
 	"github.com/bacalhau-project/bacalhau/pkg/publicapi/apimodels"
+	"github.com/bacalhau-project/bacalhau/pkg/publicapi/client/v2"
 	"github.com/bacalhau-project/bacalhau/pkg/util/idgen"
 	"github.com/bacalhau-project/bacalhau/pkg/util/templates"
 )
@@ -68,7 +69,19 @@ func NewListCmd() *cobra.Command {
 		Long:    listLong,
 		Example: listExample,
 		Args:    cobra.NoArgs,
-		RunE:    o.run,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// initialize a new or open an existing repo merging any config file(s) it contains into cfg.
+			cfg, err := util.SetupRepoConfig(cmd)
+			if err != nil {
+				return fmt.Errorf("failed to setup repo: %w", err)
+			}
+			// create an api client
+			api, err := util.GetAPIClientV2(cmd, cfg)
+			if err != nil {
+				return fmt.Errorf("failed to create api client: %w", err)
+			}
+			return o.run(cmd, api)
+		},
 	}
 
 	listCmd.Flags().StringVar(&o.Labels, "labels", o.Labels,
@@ -113,7 +126,7 @@ var listColumns = []output.TableColumn[*models.Job]{
 	},
 }
 
-func (o *ListOptions) run(cmd *cobra.Command, _ []string) error {
+func (o *ListOptions) run(cmd *cobra.Command, api client.API) error {
 	ctx := cmd.Context()
 
 	var err error
@@ -124,7 +137,7 @@ func (o *ListOptions) run(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("could not parse labels: %w", err)
 		}
 	}
-	response, err := util.GetAPIClientV2(cmd).Jobs().List(ctx, &apimodels.ListJobsRequest{
+	response, err := api.Jobs().List(ctx, &apimodels.ListJobsRequest{
 		Labels: labelRequirements,
 		BaseListRequest: apimodels.BaseListRequest{
 			Limit:     o.Limit,
@@ -137,7 +150,7 @@ func (o *ListOptions) run(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed request: %w", err)
 	}
 
-	if err = output.Output(cmd, listColumns, o.OutputOptions, response.Jobs); err != nil {
+	if err = output.Output(cmd, listColumns, o.OutputOptions, response.Items); err != nil {
 		return fmt.Errorf("failed to output: %w", err)
 	}
 

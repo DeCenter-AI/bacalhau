@@ -6,17 +6,16 @@ import (
 	"fmt"
 
 	_ "github.com/bacalhau-project/bacalhau/pkg/logger"
-	"github.com/bacalhau-project/bacalhau/pkg/model"
 	"github.com/bacalhau-project/bacalhau/pkg/models"
-	"github.com/bacalhau-project/bacalhau/pkg/storage/ipfs"
+	localdirectory "github.com/bacalhau-project/bacalhau/pkg/storage/local_directory"
 )
 
-func addInput(execution *models.Execution, cid string) *models.Execution {
+func addInput(execution *models.Execution, sourcePath string) *models.Execution {
 	execution.Job.Task().InputSources = append(execution.Job.Task().InputSources, &models.InputSource{
 		Source: &models.SpecConfig{
-			Type: models.StorageSourceIPFS,
-			Params: ipfs.Source{
-				CID: cid,
+			Type: models.StorageSourceLocalDirectory,
+			Params: localdirectory.Source{
+				SourcePath: sourcePath,
 			}.ToMap(),
 		},
 		Target: "/test_file.txt",
@@ -34,16 +33,16 @@ func addResourceUsage(execution *models.Execution, usage models.Resources) *mode
 	return execution
 }
 
-func getResources(c, m, d string) model.ResourceUsageConfig {
-	return model.ResourceUsageConfig{
+func getResources(c, m, d string) *models.ResourcesConfig {
+	return &models.ResourcesConfig{
 		CPU:    c,
 		Memory: m,
 		Disk:   d,
 	}
 }
 
-func getResourcesArray(data [][]string) []model.ResourceUsageConfig {
-	var res []model.ResourceUsageConfig
+func getResourcesArray(data [][]string) []*models.ResourcesConfig {
+	var res []*models.ResourcesConfig
 	for _, d := range data {
 		res = append(res, getResources(d[0], d[1], d[2]))
 	}

@@ -5,24 +5,22 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/bacalhau-project/bacalhau/pkg/downloader/http"
 	"github.com/bacalhau-project/bacalhau/pkg/publicapi/apimodels"
 	clientv2 "github.com/bacalhau-project/bacalhau/pkg/publicapi/client/v2"
+	"github.com/bacalhau-project/bacalhau/pkg/repo"
 
 	"github.com/bacalhau-project/bacalhau/pkg/config/types"
 	"github.com/bacalhau-project/bacalhau/pkg/lib/provider"
 	"github.com/bacalhau-project/bacalhau/pkg/models"
-	"github.com/bacalhau-project/bacalhau/pkg/publicapi/client"
 	"github.com/bacalhau-project/bacalhau/pkg/setup"
 
 	"github.com/bacalhau-project/bacalhau/pkg/devstack"
 	"github.com/bacalhau-project/bacalhau/pkg/docker"
 	"github.com/bacalhau-project/bacalhau/pkg/downloader"
-	"github.com/bacalhau-project/bacalhau/pkg/downloader/ipfs"
 	"github.com/bacalhau-project/bacalhau/pkg/logger"
-	"github.com/bacalhau-project/bacalhau/pkg/model"
 	"github.com/bacalhau-project/bacalhau/pkg/node"
 	"github.com/bacalhau-project/bacalhau/pkg/system"
 	"github.com/bacalhau-project/bacalhau/pkg/telemetry"
@@ -47,32 +45,26 @@ type ScenarioTestSuite interface {
 // their own set up or tear down routines.
 type ScenarioRunner struct {
 	suite.Suite
-	Ctx context.Context
+	Ctx    context.Context
+	Config types.BacalhauConfig
+	Repo   *repo.FsRepo
 }
 
 func (s *ScenarioRunner) SetupTest() {
 	logger.ConfigureTestLogging(s.T())
-	fsRepo := setup.SetupBacalhauRepoForTesting(s.T())
-	repoPath, err := fsRepo.Path()
-	if err != nil {
-		s.T().Fatal(err)
-	}
-	s.T().Setenv("BACALHAU_DIR", repoPath)
+	s.Repo, s.Config = setup.SetupBacalhauRepoForTesting(s.T())
 
 	s.Ctx = context.Background()
 
 	s.T().Cleanup(func() { _ = telemetry.Cleanup() })
 }
 
-func (s *ScenarioRunner) prepareStorage(stack *devstack.DevStack, getStorage SetupStorage) []model.StorageSpec {
+func (s *ScenarioRunner) prepareStorage(stack *devstack.DevStack, getStorage SetupStorage) []*models.InputSource {
 	if getStorage == nil {
-		return []model.StorageSpec{}
+		return nil
 	}
 
-	clients := stack.IPFSClients()
-	s.Require().GreaterOrEqual(len(clients), 1, "No IPFS clients to upload to?")
-
-	storageList, stErr := getStorage(s.Ctx, model.StorageSourceIPFS, stack.IPFSClients()...)
+	storageList, stErr := getStorage(s.Ctx)
 	s.Require().NoError(stErr)
 
 	return storageList
@@ -88,10 +80,14 @@ func (s *ScenarioRunner) setupStack(config *StackConfig) (*devstack.DevStack, *s
 	defaultPublisher := config.RequesterConfig.DefaultPublisher
 
 	if config.DevStackOptions == nil {
-		config.DevStackOptions = &devstack.DevStackOptions{NumberOfHybridNodes: 1}
+		config.DevStackOptions = &devstack.DevStackOptions{}
 	}
 
-	if config.RequesterConfig.JobDefaults.ExecutionTimeout == 0 {
+	if config.DevStackOptions.NumberOfNodes() == 0 {
+		config.DevStackOptions.NumberOfHybridNodes = 1
+	}
+
+	if config.RequesterConfig.JobDefaults.TotalTimeout == 0 {
 		cfg, err := node.NewRequesterConfigWithDefaults()
 		s.Require().NoError(err)
 
@@ -101,18 +97,18 @@ func (s *ScenarioRunner) setupStack(config *StackConfig) (*devstack.DevStack, *s
 	if config.ComputeConfig.TotalResourceLimits.IsZero() {
 		// TODO(forrest): [correctness] if the provided compute config has one `0` field we override the whole thing.
 		// we probably want to merge these instead.
-		cfg, err := node.NewComputeConfigWithDefaults()
+		cfg, err := node.NewComputeConfigWithDefaults(s.Config.Node.ComputeStoragePath)
 		s.Require().NoError(err)
 		config.ComputeConfig = cfg
 	}
 
 	config.RequesterConfig.DefaultPublisher = defaultPublisher
 
-	stack := testutils.Setup(s.Ctx, s.T(),
+	stack := testutils.Setup(s.Ctx, s.T(), s.Repo, s.Config,
 		append(config.DevStackOptions.Options(),
 			devstack.WithComputeConfig(config.ComputeConfig),
 			devstack.WithRequesterConfig(config.RequesterConfig),
-			testutils.WithNoopExecutor(config.ExecutorConfig),
+			testutils.WithNoopExecutor(config.ExecutorConfig, s.Config.Node.Compute.ManifestCache),
 		)...,
 	)
 
@@ -126,88 +122,66 @@ func (s *ScenarioRunner) setupStack(config *StackConfig) (*devstack.DevStack, *s
 func (s *ScenarioRunner) RunScenario(scenario Scenario) string {
 	var resultsDir string
 
-	spec := scenario.Spec
-	docker.EngineSpecRequiresDocker(s.T(), spec.EngineSpec)
+	scenario.Job.Normalize()
+	job := scenario.Job
+	task := job.Task()
+	docker.EngineSpecRequiresDocker(s.T(), task.Engine)
 
-	stack, cm := s.setupStack(scenario.Stack)
+	stack, _ := s.setupStack(scenario.Stack)
 
 	s.T().Log("Setting up storage")
-	spec.Inputs = s.prepareStorage(stack, scenario.Inputs)
-	spec.Outputs = scenario.Outputs
-	if spec.Outputs == nil {
-		spec.Outputs = []model.StorageSpec{}
-	}
-
-	s.T().Log("Submitting job")
-	j, err := model.NewJobWithSaneProductionDefaults()
-	s.Require().NoError(err)
-
-	j.Spec = spec
-	s.Require().True(model.IsValidEngine(j.Spec.EngineSpec.Engine()))
-	if !model.IsValidPublisher(j.Spec.PublisherSpec.Type) {
-		j.Spec.PublisherSpec = model.PublisherSpec{
-			Type: model.PublisherIpfs,
-		}
-	}
-
-	j.Spec.Deal = scenario.Deal
-	if j.Spec.Deal.Concurrency < 1 {
-		j.Spec.Deal.Concurrency = 1
-	}
+	task.InputSources = s.prepareStorage(stack, scenario.Inputs)
+	task.ResultPaths = scenario.Outputs
 
 	apiServer := stack.Nodes[0].APIServer
-	apiClient := client.NewAPIClient(client.NoTLS, apiServer.Address, apiServer.Port)
-	apiClientV2 := clientv2.New(fmt.Sprintf("http://%s:%d", apiServer.Address, apiServer.Port))
+	apiProtocol := "http"
+	apiHost := apiServer.Address
+	apiPort := apiServer.Port
+	api := clientv2.New(fmt.Sprintf("%s://%s:%d", apiProtocol, apiHost, apiPort))
 
-	submittedJob, submitError := apiClient.Submit(s.Ctx, j)
 	if scenario.SubmitChecker == nil {
 		scenario.SubmitChecker = SubmitJobSuccess()
 	}
-	err = scenario.SubmitChecker(submittedJob, submitError)
-	s.Require().NoError(err)
 
+	s.T().Logf("Submitting job: %v", job)
+	putResp, err := api.Jobs().Put(s.Ctx, &apimodels.PutJobRequest{
+		Job: job,
+	})
+	s.Require().NoError(scenario.SubmitChecker(putResp, err))
 	// exit if the test expects submission to fail as no further assertions can be made
-	if submitError != nil {
+	if err != nil {
 		return resultsDir
 	}
 
-	s.T().Log("Waiting for job")
-	resolver := apiClient.GetJobStateResolver()
-	err = resolver.Wait(s.Ctx, submittedJob.Metadata.ID, scenario.JobCheckers...)
+	getResp, err := api.Jobs().Get(s.Ctx, &apimodels.GetJobRequest{
+		JobID: putResp.JobID,
+	})
 	s.Require().NoError(err)
+	jobID := getResp.Job.ID
+
+	s.T().Log("Waiting for job")
+	s.Require().NoError(NewStateResolver(api).Wait(s.Ctx, jobID, scenario.JobCheckers...))
 
 	// Check outputs
 	if scenario.ResultsChecker != nil {
 		s.T().Log("Checking output")
-		results, err := apiClientV2.Jobs().Results(s.Ctx, &apimodels.ListJobResultsRequest{
-			JobID: submittedJob.Metadata.ID,
+		results, err := api.Jobs().Results(s.Ctx, &apimodels.ListJobResultsRequest{
+			JobID: jobID,
 		})
 		s.Require().NoError(err)
 
 		resultsDir = s.T().TempDir()
-		var swarmAddresses []string
-		for _, n := range stack.Nodes {
-			addrs, err := n.IPFSClient.SwarmAddresses(s.Ctx)
-			s.Require().NoError(err)
-			swarmAddresses = append(swarmAddresses, addrs...)
-		}
-
-		viper.Set(types.NodeIPFSSwarmAddresses, swarmAddresses)
-		viper.Set(types.NodeIPFSPrivateInternal, true)
 
 		downloaderSettings := &downloader.DownloaderSettings{
 			Timeout:   time.Second * 10,
 			OutputDir: resultsDir,
 		}
 
-		ipfsDownloader := ipfs.NewIPFSDownloader(cm)
-		s.Require().NoError(err)
-
 		downloaderProvider := provider.NewMappedProvider(map[string]downloader.Downloader{
-			models.StorageSourceIPFS: ipfsDownloader,
+			models.StorageSourceURL: http.NewHTTPDownloader(),
 		})
 
-		err = downloader.DownloadResults(s.Ctx, results.Results, downloaderProvider, downloaderSettings)
+		err = downloader.DownloadResults(s.Ctx, results.Items, downloaderProvider, downloaderSettings)
 		s.Require().NoError(err)
 
 		err = scenario.ResultsChecker(resultsDir)

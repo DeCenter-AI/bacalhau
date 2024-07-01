@@ -266,6 +266,48 @@ commands:
             earthly account login
             earthly sat select << pipeline.parameters.earthly_satellite >>
 
+  install_ipfs:
+    parameters:
+      cache_version:
+        type: string
+        default: v1-1
+      ipfs_version:
+        type: string
+        default: v0.18.0
+    description: Install IPFS for linux-amd64
+    steps:
+      - restore_cache:
+          keys:
+            - ipfs-<< parameters.cache_version >>-<< parameters.ipfs_version >>-{{ checksum ".circleci/config.yml" }}
+            - ipfs-<< parameters.cache_version >>-<< parameters.ipfs_version >>
+            - ipfs-<< parameters.cache_version >>
+      - run:
+          name: Install IPFS
+          command: |
+            if [ ! -f /usr/local/bin/ipfs ]; then
+              wget https://dist.ipfs.tech/go-ipfs/<< parameters.ipfs_version >>/go-ipfs_<< parameters.ipfs_version >>_linux-amd64.tar.gz -O ipfs.tar.gz
+              tar -xzf ipfs.tar.gz
+              cd go-ipfs
+              sudo bash install.sh
+              ipfs --version
+            else
+              echo "IPFS is already installed, skipping download."
+            fi
+      - save_cache:
+          key: ipfs-<< parameters.cache_version >>-<< parameters.ipfs_version >>-{{ checksum ".circleci/config.yml" }}
+          paths:
+            - /usr/local/bin/ipfs
+      - run:
+          name: Initialize IPFS
+          command: |
+            ipfs init 
+            ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001
+            ipfs config Addresses.Gateway /ip4/0.0.0.0/tcp/8080
+      - run:
+          name: Start IPFS Daemon
+          command: |
+            ipfs daemon --offline
+          background: true
 jobs:
   build_cli:
     executor: linux-amd64
@@ -350,30 +392,34 @@ jobs:
           executor: linux-amd64
 
       - run:
-          name: Install Executor Plugins
-          command: make install-plugins
-
-      - run:
-          name: Set canary dependency
-          working_directory: ops/aws/canary/lambda
-          command: make update
-
-      - run:
-          name: Build
-          working_directory: ops/aws/canary/lambda
-          command: make build -j
-
-      - run:
-          name: Run tests
-          working_directory: ops/aws/canary/lambda
           command: |
-            export GOBIN=${HOME}/bin
-            export PATH=$GOBIN:$PATH
-            go install gotest.tools/gotestsum@v1.8.2
-            make test
+            echo "CANARIES HAVE BEEN MOVED TO https://github.com/bacalhau-project/canaries"
 
-      - store_test_results:
-          path: ops/aws/canary/lambda/tests.xml
+      # - run:
+      #     name: Install Executor Plugins
+      #     command: make install-plugins
+
+      # - run:
+      #     name: Set canary dependency
+      #     working_directory: ops/aws/canary/lambda
+      #     command: make update
+
+      # - run:
+      #     name: Build
+      #     working_directory: ops/aws/canary/lambda
+      #     command: make build -j
+
+      # - run:
+      #     name: Run tests
+      #     working_directory: ops/aws/canary/lambda
+      #     command: |
+      #       export GOBIN=${HOME}/bin
+      #       export PATH=$GOBIN:$PATH
+      #       go install gotest.tools/gotestsum@v1.8.2
+      #       make test
+
+      # - store_test_results:
+      #     path: ops/aws/canary/lambda/tests.xml
 
   build_docker:
     executor: linux-amd64
@@ -444,17 +490,9 @@ jobs:
           paths:
             - bacalhau_airflow-*.tar.gz
             - bacalhau_airflow-*.whl
-      - run_make_under_specific_shell:
-          # Setup flyte integration
-          directory_to_change_to: $HOME/repo/integration/flyte
-          makefile_directory: $HOME/repo/integration/flyte
-          make_command: setup
-      - run_make_under_specific_shell:
-          # Build the flyte integration
-          directory_to_change_to: $HOME/repo/integration/flyte/plugins
-          makefile_directory: $HOME/repo/integration/flyte/plugins
-          make_command: build_all_plugins
-
+      - run:
+          name: Disabled Flyte
+          command: echo "FLYTE BUILDING DISABLED"
   test_cli:
     environment:
       GOPROXY: https://proxy.golang.org
@@ -507,6 +545,20 @@ jobs:
       - run:
           name: "Setup BACALHAU_ENVIRONMENT environment variable"
           command: echo 'export BACALHAU_ENVIRONMENT=test' >> "$BASH_ENV"
+
+      - when:
+          condition:
+            equal: ["linux-amd64", << parameters.executor >>]
+          steps:
+            - when:
+                condition:
+                  equal: ["integration", << parameters.build_tags >>]
+                steps:
+                  - install_ipfs
+                  - run:
+                      name: Set IPFS Connect Env
+                      command: echo 'export BACALHAU_NODE_IPFS_CONNECT=/ip4/127.0.0.1/tcp/5001' >> "$BASH_ENV"
+
       - run:
           name: Test Go
           environment:
@@ -547,15 +599,6 @@ jobs:
       - run:
           working_directory: integration/airflow
           command: earthly --push +run-tests
-
-  test_python_flyte:
-    executor: linux-amd64
-    steps:
-      - checkout
-      - install_python
-      - run:
-          working_directory: integration/flyte
-          command: python -m poetry run make setup test
 
   coverage:
     executor: linux-amd64
@@ -617,7 +660,6 @@ jobs:
             mkdir -p integration/airflow/dist
             cp /tmp/py_dist/bacalhau_airflow* integration/airflow/dist
             mkdir -p integration/airflow/dist
-            cp /tmp/py_dist/bacalhau_flyte* integration/flyte/dist
       - run:
           name: Release python apiclient
           command: |
@@ -635,8 +677,7 @@ jobs:
       - run:
           name: Release python Flyte integration
           command: |
-            python -m poetry run pip install twine==4.0.2
-            python -m poetry run make release-bacalhau-flyte
+            echo "FLYTE BUILDING DISABLED"
 
   build_swagger:
     executor: linux-amd64
@@ -737,7 +778,6 @@ workflows:
                 build_tags: integration
       - test_python_sdk
       - test_python_airflow
-      - test_python_flyte
       - coverage:
           name: Build coverage report
           requires:

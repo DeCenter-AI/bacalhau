@@ -14,6 +14,7 @@ import (
 
 	"github.com/bacalhau-project/bacalhau/pkg/lib/collections"
 	"github.com/bacalhau-project/bacalhau/pkg/models"
+	"github.com/bacalhau-project/bacalhau/pkg/publicapi/client/v2"
 	"github.com/bacalhau-project/bacalhau/pkg/util/idgen"
 
 	"github.com/bacalhau-project/bacalhau/cmd/util"
@@ -60,16 +61,28 @@ func NewDescribeCmd() *cobra.Command {
 		Long:    describeLong,
 		Example: describeExample,
 		Args:    cobra.ExactArgs(1),
-		RunE:    o.run,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// initialize a new or open an existing repo merging any config file(s) it contains into cfg.
+			cfg, err := util.SetupRepoConfig(cmd)
+			if err != nil {
+				return fmt.Errorf("failed to setup repo: %w", err)
+			}
+			// create an api client
+			api, err := util.GetAPIClientV2(cmd, cfg)
+			if err != nil {
+				return fmt.Errorf("failed to create api client: %w", err)
+			}
+			return o.run(cmd, args, api)
+		},
 	}
 	jobCmd.Flags().AddFlagSet(cliflags.OutputNonTabularFormatFlags(&o.OutputOpts))
 	return jobCmd
 }
 
-func (o *DescribeOptions) run(cmd *cobra.Command, args []string) error {
+func (o *DescribeOptions) run(cmd *cobra.Command, args []string, api client.API) error {
 	ctx := cmd.Context()
 	jobID := args[0]
-	response, err := util.GetAPIClientV2(cmd).Jobs().Get(ctx, &apimodels.GetJobRequest{
+	response, err := api.Jobs().Get(ctx, &apimodels.GetJobRequest{
 		JobID:   jobID,
 		Include: "executions,history",
 	})
@@ -89,7 +102,7 @@ func (o *DescribeOptions) run(cmd *cobra.Command, args []string) error {
 	var executions []*models.Execution
 	if response.Executions != nil {
 		// TODO: #520 rename Executions.Executions to Executions.Items
-		executions = response.Executions.Executions
+		executions = response.Executions.Items
 	}
 	// Show most relevant execution first: sort by time DESC
 	slices.SortFunc(executions, func(a, b *models.Execution) int {
@@ -98,7 +111,7 @@ func (o *DescribeOptions) run(cmd *cobra.Command, args []string) error {
 
 	var history []*models.JobHistory
 	if response.History != nil {
-		history = response.History.History
+		history = response.History.Items
 	}
 
 	o.printHeaderData(cmd, job)

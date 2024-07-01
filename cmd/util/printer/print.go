@@ -49,6 +49,7 @@ type eventStruct struct {
 // PrintJobExecution displays information about the execution of a job
 func PrintJobExecution(
 	ctx context.Context,
+	job *models.Job,
 	jobID string,
 	cmd *cobra.Command,
 	runtimeSettings *cliflags.RunTimeSettings,
@@ -68,7 +69,7 @@ func PrintJobExecution(
 	}
 
 	if runtimeSettings.Follow {
-		return followLogs(cmd, jobID, client)
+		return followLogs(cmd, client, jobID, client)
 	}
 
 	// if we are only printing the id, set the rest of the output to "quiet",
@@ -89,7 +90,7 @@ func PrintJobExecution(
 			return fmt.Errorf("failed getting job history: %w", err)
 		}
 
-		historySummary := summariseHistoryEvents(history.History)
+		historySummary := summariseHistoryEvents(history.Items)
 		if len(historySummary) > 0 {
 			for _, event := range historySummary {
 				printEvent(cmd, event)
@@ -99,14 +100,14 @@ func PrintJobExecution(
 		}
 	}
 
-	if runtimeSettings.PrintNodeDetails {
+	if runtimeSettings.PrintNodeDetails || jobErr != nil {
 		executions, err := client.Jobs().Executions(ctx, &apimodels.ListJobExecutionsRequest{
 			JobID: jobID,
 		})
 		if err != nil {
 			return fmt.Errorf("failed getting job executions: %w", err)
 		}
-		summary := summariseExecutions(executions.Executions)
+		summary := summariseExecutions(executions.Items)
 		if len(summary) > 0 {
 			cmd.Println("\nJob Results By Node:")
 			for message, runs := range summary {
@@ -129,12 +130,19 @@ func PrintJobExecution(
 		cmd.Println()
 		cmd.Println("To get more details about the run executions, execute:")
 		cmd.Println("\t" + os.Args[0] + " job executions " + jobID)
+
+		// only print help for downloading the job if it contained a publisher.
+		if !lo.IsEmpty(job.Task().Publisher.Type) {
+			cmd.Println()
+			cmd.Println("To download the results, execute:")
+			cmd.Println("\t" + os.Args[0] + " job get " + jobID)
+		}
 	}
 
 	return nil
 }
 
-func followLogs(cmd *cobra.Command, jobID string, client clientv2.API) error {
+func followLogs(cmd *cobra.Command, api clientv2.API, jobID string, client clientv2.API) error {
 	cmd.Printf("Job successfully submitted. Job ID: %s\n", jobID)
 	cmd.Printf("Waiting for logs... (Enter Ctrl+C to exit at any time, your job will continue running):\n\n")
 
@@ -154,7 +162,7 @@ func followLogs(cmd *cobra.Command, jobID string, client clientv2.API) error {
 		time.Sleep(time.Duration(1) * time.Second)
 	}
 
-	return util.Logs(cmd, util.LogOptions{
+	return util.Logs(cmd, api, util.LogOptions{
 		JobID:  jobID,
 		Follow: true,
 	})

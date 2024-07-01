@@ -12,6 +12,84 @@ import (
 
 const DefaultMaxDecompressSize = 100 * 1024 * 1024 * 1024 // 100 GB
 
+// Compress compresses the sourcePath (which can be a file or a directory)
+// into a gzip archive written to targetFile. It uses relative paths for
+// the file headers within the archive to preserve the directory structure.
+func Compress(sourcePath string, targetFile *os.File) error {
+	gw := gzip.NewWriter(targetFile)
+	defer gw.Close()
+
+	tarWriter := tar.NewWriter(gw)
+	defer tarWriter.Close()
+
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat source path: %w", err)
+	}
+
+	if info.IsDir() {
+		return filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			// Get the relative path for the file
+			relpath, err := filepath.Rel(sourcePath, path)
+			if err != nil {
+				return err
+			}
+			header, err := tar.FileInfoHeader(info, "")
+			if err != nil {
+				return err
+			}
+			header.Name = relpath
+			if err := tarWriter.WriteHeader(header); err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			// Open the file for reading.
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			// Write the file contents to the GZIP archive.
+			_, err = io.Copy(tarWriter, file)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+	} else {
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.Base(sourcePath)
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		// Open the file for reading.
+		file, err := os.Open(sourcePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		// Write the file contents to the GZIP archive.
+		_, err = io.Copy(tarWriter, file)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Decompress takes the path to a .tar.gz file and decompresses it into the specified directory.
 func Decompress(tarGzPath, destDir string) error {
 	return DecompressWithMaxBytes(tarGzPath, destDir, DefaultMaxDecompressSize)
@@ -23,14 +101,14 @@ func DecompressWithMaxBytes(tarGzPath, destDir string, maxDecompressSize int64) 
 	// Open the tar.gz file for reading.
 	file, err := os.Open(tarGzPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open tar.gz file: %w", err)
 	}
 	defer file.Close()
 
 	// Create a gzip reader.
 	gzr, err := gzip.NewReader(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
@@ -44,7 +122,7 @@ func DecompressWithMaxBytes(tarGzPath, destDir string, maxDecompressSize int64) 
 			break // End of archive
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
 		// Clean the name to mitigate directory traversal
@@ -61,7 +139,7 @@ func DecompressWithMaxBytes(tarGzPath, destDir string, maxDecompressSize int64) 
 		case tar.TypeDir:
 			// It's a directory; create it.
 			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return err
+				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		case tar.TypeReg:
 			// It's a file; create it, preserving the file mode.
@@ -71,12 +149,12 @@ func DecompressWithMaxBytes(tarGzPath, destDir string, maxDecompressSize int64) 
 			}
 			fileToWrite, err := os.OpenFile(target, os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to create file: %w", err)
 			}
 			// Copy the file data from the archive, enforcing the file size limit.
 			if _, err := io.CopyN(fileToWrite, tr, header.Size); err != nil {
 				fileToWrite.Close()
-				return err
+				return fmt.Errorf("failed to copy file data: %w", err)
 			}
 			fileToWrite.Close()
 		}

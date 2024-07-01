@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	files "github.com/ipfs/boxo/files"
+	"github.com/ipfs/boxo/files"
 	dag "github.com/ipfs/boxo/ipld/merkledag"
 	ft "github.com/ipfs/boxo/ipld/unixfs"
 	icorepath "github.com/ipfs/boxo/path"
@@ -20,29 +20,23 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bacalhau-project/bacalhau/pkg/system"
 	"github.com/bacalhau-project/bacalhau/pkg/util/generic"
 	"github.com/bacalhau-project/bacalhau/pkg/util/multiaddresses"
 )
 
-// Client is a front-end for an ipfs node's API endpoints. You can create
-// Client instances manually by connecting to an ipfs node's API multiaddr using NewClientUsingRemoteHandler,
-// or automatically from an active Node instance using NewClient.
+// Client is a front-end for an ipfs node's API endpoints
 type Client struct {
 	API  icore.CoreAPI
 	addr string
 }
 
-// NewClientUsingRemoteHandler creates an API client for the given ipfs node API multiaddress.
-// NOTE: the API address is _not_ the same as the swarm address
-func NewClientUsingRemoteHandler(ctx context.Context, apiAddr string) (Client, error) {
+// NewClient creates an API client for the given ipfs node API multiaddress.
+func NewClient(ctx context.Context, apiAddr string) (*Client, error) {
 	addr, err := ma.NewMultiaddr(apiAddr)
 	if err != nil {
-		return Client{}, fmt.Errorf("failed to parse api address '%s': %w", apiAddr, err)
+		return nil, fmt.Errorf("failed to parse api address '%s': %w", apiAddr, err)
 	}
 
 	// This http.Transport is the same that httpapi.NewApi would use if we weren't passing in our own http.Client
@@ -51,38 +45,23 @@ func NewClientUsingRemoteHandler(ctx context.Context, apiAddr string) (Client, e
 		DisableKeepAlives: true,
 	}
 	api, err := httpapi.NewApiWithClient(addr, &http.Client{
-		Transport: otelhttp.NewTransport(
-			defaultTransport,
-			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
-				return fmt.Sprintf("%s %s", r.Method, r.URL.Path)
-			}),
-			otelhttp.WithSpanOptions(trace.WithAttributes(semconv.PeerService("ipfs"))),
-		),
+		Transport: defaultTransport,
 	})
 	if err != nil {
-		return Client{}, fmt.Errorf("failed to connect to '%s': %w", apiAddr, err)
+		return nil, fmt.Errorf("failed to connect to '%s': %w", apiAddr, err)
 	}
 
-	client := Client{
+	client := &Client{
 		API:  api,
 		addr: apiAddr,
 	}
 
 	id, err := client.ID(ctx)
 	if err != nil {
-		return Client{}, fmt.Errorf("failed to connect to '%s': %w", apiAddr, err)
+		return nil, fmt.Errorf("failed to connect to '%s': %w", apiAddr, err)
 	}
 	log.Ctx(ctx).Debug().Msgf("Created remote IPFS client for node API address: %s, with id: %s", apiAddr, id)
 	return client, nil
-}
-
-const MagicInternalIPFSAddress = "memory://in-memory-node/"
-
-func NewClient(api icore.CoreAPI) Client {
-	return Client{
-		API:  api,
-		addr: MagicInternalIPFSAddress,
-	}
 }
 
 // ID returns the node's ipfs ID.
@@ -267,45 +246,32 @@ func (cl Client) GetCidSize(ctx context.Context, cid string) (uint64, error) {
 	return uint64(stat.CumulativeSize), nil
 }
 
-// nodesWithCID returns the ipfs ids of nodes that have the given CID pinned.
-func (cl Client) nodesWithCID(ctx context.Context, cid string) ([]string, error) {
-	path, err := pathFromCIDString(cid)
-	if err != nil {
-		return nil, errors.Wrap(err, fmt.Sprintf("unable to create path from CID: %s", cid))
-	}
-
-	ch, err := cl.API.Dht().FindProviders(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("error finding providers of '%s': %w", cid, err)
-	}
-
-	var res []string
-	for info := range ch {
-		res = append(res, info.ID.String())
-	}
-
-	return res, nil
-}
-
 // HasCID returns true if the node has the given CID locally, whether pinned or not.
 func (cl Client) HasCID(ctx context.Context, cid string) (bool, error) {
-	id, err := cl.ID(ctx)
+	// create an offline API that will not search the network for content.
+	offlineAPI, err := cl.API.WithOptions(
+		icoreoptions.Api.FetchBlocks(false),
+		icoreoptions.Api.Offline(true),
+	)
 	if err != nil {
-		return false, fmt.Errorf("error fetching node's ipfs id: %w", err)
+		return false, err
 	}
-
-	nodes, err := cl.nodesWithCID(ctx, cid)
+	path, err := pathFromCIDString(cid)
 	if err != nil {
-		return false, fmt.Errorf("error fetching nodes with cid '%s': %w", cid, err)
+		return false, errors.Wrap(err, fmt.Sprintf("unable to create path from CID: %s", cid))
 	}
-
-	for _, node := range nodes {
-		if node == id {
-			return true, nil
+	// attempt to stat the block in the local IPFS, if it's not found w/ the offlineAPI then the content
+	// is not local to the IPFS node.
+	_, err = offlineAPI.Block().Stat(ctx, path)
+	if err != nil {
+		if ipld.IsNotFound(err) {
+			return false, nil
 		}
+		return false, err
 	}
 
-	return false, nil
+	// stating the CID was successful, IPFS has this content locally.
+	return true, nil
 }
 
 func (cl Client) GetTreeNode(ctx context.Context, cid string) (IPLDTreeNode, error) {

@@ -9,7 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bacalhau-project/bacalhau/pkg/config/types"
 	"github.com/bacalhau-project/bacalhau/pkg/publicapi/apimodels"
+	clientv2 "github.com/bacalhau-project/bacalhau/pkg/publicapi/client/v2"
 	"github.com/bacalhau-project/bacalhau/pkg/util/idgen"
 
 	"github.com/bacalhau-project/bacalhau/cmd/util/flags/cliflags"
@@ -20,19 +22,21 @@ import (
 func DownloadResultsHandler(
 	ctx context.Context,
 	cmd *cobra.Command,
+	cfg types.BacalhauConfig,
+	apiV2 clientv2.API,
 	jobID string,
 	downloadSettings *cliflags.DownloaderSettings,
 ) error {
 	cmd.PrintErrf("Fetching results of job '%s'...\n", jobID)
-	cm := GetCleanupManager(ctx)
-	response, err := GetAPIClientV2(cmd).Jobs().Results(ctx, &apimodels.ListJobResultsRequest{
+
+	response, err := apiV2.Jobs().Results(ctx, &apimodels.ListJobResultsRequest{
 		JobID: jobID,
 	})
 	if err != nil {
 		Fatal(cmd, fmt.Errorf("could not get results for job %s: %w", jobID, err), 1)
 	}
 
-	if len(response.Results) == 0 {
+	if len(response.Items) == 0 {
 		// No results doesn't mean error, so we should print out a message and return nil
 		cmd.Println("No results found")
 		cmd.Println("You can check the logged output of the job using the logs command.")
@@ -40,17 +44,17 @@ func DownloadResultsHandler(
 		return nil
 	}
 
-	downloaderProvider := util.NewStandardDownloaders(cm)
+	downloaderProvider, err := util.NewStandardDownloaders(ctx, cfg.Node.IPFS.Connect)
 	if err != nil {
 		return err
 	}
 
 	// check if we don't support downloading the results
-	for _, result := range response.Results {
+	for _, result := range response.Items {
 		if !downloaderProvider.Has(ctx, result.Type) {
 			cmd.PrintErrln(
 				"No supported downloader found for the published results. You will have to download the results differently.")
-			b, err := json.MarshalIndent(response.Results, "", "    ")
+			b, err := json.MarshalIndent(response.Items, "", "    ")
 			if err != nil {
 				return err
 			}
@@ -66,7 +70,7 @@ func DownloadResultsHandler(
 
 	err = downloader.DownloadResults(
 		ctx,
-		response.Results,
+		response.Items,
 		downloaderProvider,
 		(*downloader.DownloaderSettings)(processedDownloadSettings),
 	)

@@ -4,12 +4,6 @@ import "github.com/bacalhau-project/bacalhau/pkg/config/types"
 
 var NetworkFlags = []Definition{
 	{
-		FlagName:     "network",
-		ConfigPath:   types.NodeNetworkType,
-		DefaultValue: Default.Node.Network.Type,
-		Description:  `Inter-node network layer type (e.g. nats, libp2p).`,
-	},
-	{
 		FlagName:     "network-port",
 		ConfigPath:   types.NodeNetworkPort,
 		DefaultValue: Default.Node.Network.Port,

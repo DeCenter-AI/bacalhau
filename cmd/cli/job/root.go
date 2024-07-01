@@ -1,8 +1,9 @@
 package job
 
 import (
-	"github.com/bacalhau-project/bacalhau/cmd/util/hook"
 	"github.com/spf13/cobra"
+
+	"github.com/bacalhau-project/bacalhau/cmd/util/hook"
 )
 
 func NewCmd() *cobra.Command {
@@ -20,5 +21,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(NewLogCmd())
 	cmd.AddCommand(NewRunCmd())
 	cmd.AddCommand(NewStopCmd())
+	cmd.AddCommand(NewGetCmd())
+	cmd.AddCommand(NewValidateCmd())
 	return cmd
 }

@@ -10,22 +10,17 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	legacy_job "github.com/bacalhau-project/bacalhau/pkg/legacyjob"
-	"github.com/bacalhau-project/bacalhau/pkg/orchestrator/transformer"
-
 	"github.com/bacalhau-project/bacalhau/pkg/config"
 	"github.com/bacalhau-project/bacalhau/pkg/models"
+	"github.com/bacalhau-project/bacalhau/pkg/orchestrator/transformer"
 
 	"github.com/bacalhau-project/bacalhau/pkg/devstack"
 	"github.com/bacalhau-project/bacalhau/pkg/executor"
 	"github.com/bacalhau-project/bacalhau/pkg/executor/noop"
 	_ "github.com/bacalhau-project/bacalhau/pkg/logger"
-	"github.com/bacalhau-project/bacalhau/pkg/model"
 	"github.com/bacalhau-project/bacalhau/pkg/node"
-	"github.com/bacalhau-project/bacalhau/pkg/orchestrator/retry"
 	"github.com/bacalhau-project/bacalhau/pkg/system"
 	"github.com/bacalhau-project/bacalhau/pkg/test/scenario"
-	testutils "github.com/bacalhau-project/bacalhau/pkg/test/utils"
 )
 
 type DevstackTimeoutSuite struct {
@@ -54,7 +49,7 @@ func (suite *DevstackTimeoutSuite) TestRunningTimeout() {
 	}
 
 	runTest := func(testCase TestCase) {
-		computeConfig, err := node.NewComputeConfigWith(node.ComputeConfigParams{
+		computeConfig, err := node.NewComputeConfigWith(suite.Config.Node.ComputeStoragePath, node.ComputeConfigParams{
 			JobNegotiationTimeout:                 testCase.computeJobNegotiationTimeout,
 			MinJobExecutionTimeout:                testCase.computeMinJobExecutionTimeout,
 			MaxJobExecutionTimeout:                testCase.computeMaxJobExecutionTimeout,
@@ -64,12 +59,19 @@ func (suite *DevstackTimeoutSuite) TestRunningTimeout() {
 
 		requesterConfig, err := node.NewRequesterConfigWith(node.RequesterConfigParams{
 			JobDefaults: transformer.JobDefaults{
-				ExecutionTimeout: testCase.requesterDefaultJobExecutionTimeout,
+				TotalTimeout: testCase.requesterDefaultJobExecutionTimeout,
 			},
-			HousekeepingBackgroundTaskInterval: 1 * time.Second,
-			RetryStrategy:                      retry.NewFixedStrategy(retry.FixedStrategyParams{ShouldRetry: false}),
+			HousekeepingBackgroundTaskInterval: 100 * time.Millisecond,
+			// we want compute nodes to fail first instead or requesters to cancel
+			HousekeepingTimeoutBuffer: 2 * time.Second,
 		})
 		suite.Require().NoError(err)
+
+		// required by job_timeout_greater_than_max_but_on_allowed_list
+		namespace := ""
+		if len(testCase.computeJobExecutionBypassList) > 0 {
+			namespace = testCase.computeJobExecutionBypassList[0]
+		}
 
 		testScenario := scenario.Scenario{
 			Stack: &scenario.StackConfig{
@@ -90,18 +92,29 @@ func (suite *DevstackTimeoutSuite) TestRunningTimeout() {
 					},
 				},
 			},
-			Spec: testutils.MakeSpecWithOpts(suite.T(),
-				legacy_job.WithPublisher(model.PublisherSpec{Type: model.PublisherIpfs}),
-				legacy_job.WithTimeout(int64(testCase.jobTimeout.Seconds())),
-			),
-			Deal: model.Deal{
-				Concurrency: testCase.concurrency,
+			Job: &models.Job{
+				Name:      suite.T().Name(),
+				Namespace: namespace,
+				Type:      models.JobTypeBatch,
+				Count:     testCase.concurrency,
+				Tasks: []*models.Task{
+					{
+						Name: suite.T().Name(),
+						Engine: &models.SpecConfig{
+							Type:   models.EngineNoop,
+							Params: make(map[string]interface{}),
+						},
+						Timeouts: &models.TimeoutConfig{
+							TotalTimeout: int64(testCase.jobTimeout.Seconds()),
+						},
+					},
+				},
 			},
-			JobCheckers: []legacy_job.CheckStatesFunction{
-				legacy_job.WaitForExecutionStates(map[model.ExecutionStateType]int{
-					model.ExecutionStateCompleted:         testCase.completedCount,
-					model.ExecutionStateCancelled:         testCase.errorCount,
-					model.ExecutionStateAskForBidRejected: testCase.rejectedCount,
+			JobCheckers: []scenario.StateChecks{
+				scenario.WaitForExecutionStates(map[models.ExecutionStateType]int{
+					models.ExecutionStateCompleted:         testCase.completedCount,
+					models.ExecutionStateFailed:            testCase.errorCount,
+					models.ExecutionStateAskForBidRejected: testCase.rejectedCount,
 				}),
 			},
 		}
@@ -109,7 +122,7 @@ func (suite *DevstackTimeoutSuite) TestRunningTimeout() {
 		suite.RunScenario(testScenario)
 	}
 
-	clientID, err := config.GetClientID()
+	clientID, err := config.GetClientID(suite.Config.User.KeyPath)
 	suite.Require().NoError(err)
 	for _, testCase := range []TestCase{
 		{
@@ -136,11 +149,23 @@ func (suite *DevstackTimeoutSuite) TestRunningTimeout() {
 			completedCount:                      1,
 		},
 		{
+			name:                                "sleep_within_timeout_buffer",
+			computeJobNegotiationTimeout:        10 * time.Second,
+			computeMinJobExecutionTimeout:       1 * time.Nanosecond,
+			computeMaxJobExecutionTimeout:       1 * time.Minute,
+			requesterDefaultJobExecutionTimeout: 20 * time.Second,
+			nodeCount:                           1,
+			concurrency:                         1,
+			jobTimeout:                          1 * time.Millisecond,
+			sleepTime:                           100 * time.Millisecond, // less than 500ms buffer
+			completedCount:                      1,
+		},
+		{
 			name:                                "sleep_longer_than_default_running_timeout",
 			computeJobNegotiationTimeout:        10 * time.Second,
 			computeMinJobExecutionTimeout:       1 * time.Nanosecond,
 			computeMaxJobExecutionTimeout:       1 * time.Minute,
-			requesterDefaultJobExecutionTimeout: 1 * time.Millisecond,
+			requesterDefaultJobExecutionTimeout: 1 * time.Second,
 			nodeCount:                           1,
 			concurrency:                         1,
 			sleepTime:                           20 * time.Second,

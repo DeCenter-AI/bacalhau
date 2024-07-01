@@ -3,6 +3,7 @@ acks
 Addrs
 alessio
 apimodels
+argsp
 armv
 astype
 authorised
@@ -10,6 +11,7 @@ autofetch
 automagically
 bacalhau
 bacalhauproject
+baccrypto
 bacerrors
 bafybeig
 bbolt
@@ -55,7 +57,9 @@ deflt
 deleteme
 devstack
 devstask
+direnv
 doclines
+dotenv
 dpkg
 dpokidov
 dport
@@ -129,6 +133,8 @@ groupby
 gserviceaccount
 healthz
 helloworld
+HMAC
+hmarr
 humanid
 icore
 icoreoptions
@@ -365,4 +371,3 @@ yyyymmddhhmm
 zarr
 zerolog
 zidane
-HMAC
