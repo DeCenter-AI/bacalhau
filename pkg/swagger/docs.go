@@ -3253,6 +3253,9 @@ const docTemplate = `{
                 },
                 "S3": {
                     "$ref": "#/definitions/types.S3Publisher"
+                },
+                "S3Managed": {
+                    "$ref": "#/definitions/types.S3ManagedPublisher"
                 }
             }
         },
@@ -3337,6 +3340,31 @@ const docTemplate = `{
             "properties": {
                 "IPFS": {
                     "$ref": "#/definitions/types.IpfsDownloader"
+                }
+            }
+        },
+        "types.S3ManagedPublisher": {
+            "type": "object",
+            "properties": {
+                "Bucket": {
+                    "description": "Bucket specifies the S3 bucket name for managed publisher",
+                    "type": "string"
+                },
+                "Endpoint": {
+                    "description": "Endpoint specifies an optional custom S3 endpoint",
+                    "type": "string"
+                },
+                "Key": {
+                    "description": "Key specifies an optional prefix for objects stored in the bucket",
+                    "type": "string"
+                },
+                "PreSignedURLExpiration": {
+                    "description": "PreSignedURLExpiration specifies the duration before a pre-signed URL expires.",
+                    "type": "integer"
+                },
+                "Region": {
+                    "description": "Region specifies the region the S3 bucket is in",
+                    "type": "string"
                 }
             }
         },
