@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/bacalhau-project/bacalhau/pkg/analytics"
 	"github.com/bacalhau-project/bacalhau/pkg/bacerrors"
 	"github.com/bacalhau-project/bacalhau/pkg/compute/logstream"
@@ -13,7 +15,6 @@ import (
 	"github.com/bacalhau-project/bacalhau/pkg/models"
 	"github.com/bacalhau-project/bacalhau/pkg/models/messages"
 	"github.com/bacalhau-project/bacalhau/pkg/orchestrator/transformer"
-	"github.com/google/uuid"
 )
 
 const initialJobVersion = 1
@@ -266,6 +267,10 @@ func (e *BaseEndpoint) RerunJob(ctx context.Context, request *RerunJobRequest) (
 	if err != nil {
 		return nil, jobstore.NewJobStoreError(err.Error())
 	}
+
+	// We need to keep a record of the job latest version
+	jobLatestVersion := job.Version
+
 	if request.JobVersion != 0 {
 		job, err = e.store.GetJobVersion(txContext, job.ID, request.JobVersion)
 		if err != nil {
@@ -297,7 +302,8 @@ func (e *BaseEndpoint) RerunJob(ctx context.Context, request *RerunJobRequest) (
 		return nil, err
 	}
 
-	if err = e.store.AddJobHistory(txContext, job.ID, job.Version+jobVersionIncrement, JobRerunEvent("job rerun")); err != nil {
+	newJobVersion := jobLatestVersion + jobVersionIncrement
+	if err = e.store.AddJobHistory(txContext, job.ID, newJobVersion, JobRerunEvent("job rerun")); err != nil {
 		return nil, err
 	}
 
@@ -324,7 +330,7 @@ func (e *BaseEndpoint) RerunJob(ctx context.Context, request *RerunJobRequest) (
 
 	return &RerunJobResponse{
 		JobID:        job.ID,
-		JobVersion:   job.Version + jobVersionIncrement,
+		JobVersion:   newJobVersion,
 		EvaluationID: eval.ID,
 		Warnings:     nil,
 	}, nil
@@ -344,10 +350,9 @@ func (e *BaseEndpoint) ReadLogs(ctx context.Context, request ReadLogsRequest) (
 	}
 
 	executions, err := e.store.GetExecutions(ctx, jobstore.GetExecutionsOptions{
-		JobID:                   job.ID,
-		JobVersion:              request.JobVersion,
-		AllJobVersions:          true, // Get all executions to help with filtering
-		CurrentLatestJobVersion: job.Version,
+		JobID:          job.ID,
+		JobVersion:     request.JobVersion,
+		AllJobVersions: true, // Get all executions to help with filtering
 	})
 	if err != nil {
 		return nil, err
@@ -415,9 +420,8 @@ func (e *BaseEndpoint) GetResults(ctx context.Context, request *GetResultsReques
 	}
 
 	executions, err := e.store.GetExecutions(ctx, jobstore.GetExecutionsOptions{
-		JobID:                   job.ID,
-		JobVersion:              job.Version,
-		CurrentLatestJobVersion: job.Version,
+		JobID:      job.ID,
+		JobVersion: job.Version,
 	})
 	if err != nil {
 		return GetResultsResponse{}, err
